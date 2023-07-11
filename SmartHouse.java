@@ -1,31 +1,46 @@
-package tinkoff.SmartHouseProject;
-
 import java.io.*;
+import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLConnection;
 import java.util.*;
 
 public class SmartHouse {
+    static long time = 0, serial = 1;
+    static int hub = 0;
+    static URL url = null;
+    static String deviceName = "SmartHub";
+    static ArrayList<Device> devices = new ArrayList<>();
+
     public static void main(String[] args) {
-        int hub = Integer.parseInt(args[1].trim(), 16), serial = 1;
-        long time = 0;
-        ArrayList<Device> devices = new ArrayList<>();
-        URLConnection connection = null;
+        hub = Integer.parseInt(args[1].trim(), 16);
+        String raw;
         try {
-            URL url = new URL(args[0]);
-            connection = url.openConnection();
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-        } catch (Exception ex) {
+            url = new URL(args[0]);
+        } catch (MalformedURLException e) {
             System.exit(99);
         }
-//        String data = "";
-        String data = collectRequestData(hub, serial++);
+
+        raw = sendDataRequest(whoIsHereData());
+        processReturnData(raw);
+        Optional<Device> optSwitch = devices.stream().filter(d -> d.type == 3).findFirst();
+        if (optSwitch.isPresent()) {
+            raw = sendDataRequest(getStatusData(optSwitch.get().address));
+            System.out.println(raw);
+            processReturnData(raw);
+        }
+    }
+
+    public static String sendDataRequest(String data) {
         System.out.println("reqData " + data);
-        String raw = requestServer(connection, data);
+        String raw = requestServer(data);
         if (Objects.equals(raw, "")) System.exit(99);
 
-        System.out.println(raw);
+        raw = requestServer(data);
+        if (Objects.equals(raw, "")) System.exit(99);
+        return raw;
+    }
+
+    public static void processReturnData(String raw) {
         try {
             System.out.println(Arrays.toString(Base64.getDecoder().decode(raw)));
             byte[] bytes = Base64.getDecoder().decode(raw);
@@ -39,32 +54,74 @@ public class SmartHouse {
                 packet.payload = new Payload(payload);
                 packet.src8 = bytes[i++];
                 if (packet.payload.devType == 6) {
-                    time = packet.payload.cmdBody.timestamp;
+                    if (packet.payload.cmd == 6) time = packet.payload.cmdBody.timestamp;
                 } else {
+                    int index = 0;
+                    Device device = null;
+
                     Optional<Device> optDevice = devices.stream().filter(d -> d.address == packet.payload.src).findFirst();
                     if (optDevice.isPresent()) {
-                        Device device = optDevice.get();
-                        int index = devices.indexOf(device);
-                        device.lastTimeUpdate = time;
-                        devices.set(index, device);
+                        device = optDevice.get();
+                        index = devices.indexOf(device);
                     } else {
-                        devices.add(new Device(packet.payload.src, packet.payload.devType));
+                        device = new Device(packet.payload.src, packet.payload.devType);
+                        if (packet.payload.cmd == 1 || packet.payload.cmd == 2)
+                            device.name = packet.payload.cmdBody.devName;
+                        devices.add(device);
+                        System.out.println("added " + device);
+                        index = devices.size() - 1;
                     }
-                }
-                System.out.println(packet);
-            }
 
-            for (int i = 0; i < devices.size(); i++) {
-                if (time - devices.get(i).lastTimeUpdate > 300)
-                    devices.remove(i);
+                    if (packet.payload.devType == 3) {
+                        if (packet.payload.cmdBody.connectedSwitch != null)
+                            device.connectedSwitch = packet.payload.cmdBody.connectedSwitch;
+                        if (packet.payload.cmd == 4) {
+                            device.active = (packet.payload.cmdBody.status == 1);
+                            System.out.println(packet);
+                            if (device.active)
+                                switchTurnConnectedDevices(device.connectedSwitch);
+                        }
+                    }
+                    device.lastTimeUpdate = time;
+                    devices.set(index, device);
+                    System.out.println(packet);
+                }
+
+                for (Device device : devices) {
+                    if (time - device.lastTimeUpdate > 300)
+                        device.active = false;
+                    else
+                        System.out.println("device: " + device);
+                }
+                System.out.println("end devices");
             }
         } catch (IllegalArgumentException ignored) {
         }
     }
 
-    public static String requestServer(URLConnection connection, String data) {
+    public static void switchTurnConnectedDevices(String[] devicesNames) {
+        for (String deviceName : devicesNames) {
+            Optional<Device> optDevice = devices.stream().filter(d -> d.name.equals(deviceName)).findFirst();
+            if (optDevice.isPresent()) {
+                Device device = optDevice.get();
+                System.out.println("switched on " + device);
+                int index = devices.indexOf(device);
+                device.active = true;
+                devices.set(index, device);
+
+                String raw = requestServer(setStatusData(device.address, (byte) 1));
+                System.out.println(raw);
+                processReturnData(raw);
+            }
+        }
+    }
+
+    public static String requestServer(String data) {
         String raw = "";
         try {
+            URLConnection connection = url.openConnection();
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
             connection.setRequestProperty("Content-Length", Integer.toString(data.length()));
             try (DataOutputStream dos = new DataOutputStream(connection.getOutputStream())) {
                 dos.writeBytes(data);
@@ -76,31 +133,63 @@ public class SmartHouse {
             raw = raw.replace('-', '+').replace('_', '/');
         } catch (Exception ex) {
             ex.printStackTrace();
+            System.exit(99);
         }
         return raw;
     }
 
-    public static String collectRequestData(int hub, int serial) {
-        String deviceName = "SmartHub";
+    public static String whoIsHereData() {
         ArrayList<Byte> payload = new ArrayList<>();
         Packet.toULEB(hub, payload);
         Packet.toULEB(0x3FFF, payload);
-        Packet.toULEB(serial, payload);
+        Packet.toULEB((int) serial, payload);
         payload.add((byte) 1);
         payload.add((byte) 1);
         payload.add((byte) deviceName.length());
         for (byte b : deviceName.getBytes())
             payload.add(b);
 
-        byte[] bytes = new byte[1 + payload.size() + 1];
-        bytes[0] = (byte) payload.size();
-        for (int i = 0; i < payload.size(); i++)
-            bytes[i + 1] = payload.get(i);
-
-
+        byte[] bytes = listToBytes(payload);
         bytes[bytes.length - 1] = computeSRC8(payload);
         System.out.println("bytes " + Arrays.toString(bytes));
 
+        return Base64.getEncoder().encodeToString(bytes).replace("=", "").replace('+', '-').replace('/', '_');
+    }
+
+    public static byte[] listToBytes(ArrayList<Byte> byteList) {
+        byte[] bytes = new byte[1 + byteList.size() + 1];
+        bytes[0] = (byte) byteList.size();
+        for (int i = 0; i < byteList.size(); i++)
+            bytes[i + 1] = byteList.get(i);
+        return bytes;
+    }
+
+    public static String getStatusData(int dst) {
+        ArrayList<Byte> payload = new ArrayList<>();
+        Packet.toULEB(hub, payload);
+        Packet.toULEB(dst, payload);
+        Packet.toULEB((int) serial++, payload);
+        payload.add((byte) 1); // devType
+        payload.add((byte) 3); // cmd
+
+        byte[] bytes = listToBytes(payload);
+        bytes[bytes.length - 1] = computeSRC8(payload);
+        System.out.println("bytes " + Arrays.toString(bytes));
+        return Base64.getEncoder().encodeToString(bytes).replace("=", "").replace('+', '-').replace('/', '_');
+    }
+
+    public static String setStatusData(int dst, byte status) {
+        ArrayList<Byte> payload = new ArrayList<>();
+        Packet.toULEB(hub, payload);
+        Packet.toULEB(dst, payload);
+        Packet.toULEB((int) serial++, payload);
+        payload.add((byte) 1); // devType
+        payload.add((byte) 5); // cmd
+        payload.add(status); // cmdBody
+
+        byte[] bytes = listToBytes(payload);
+        bytes[bytes.length - 1] = computeSRC8(payload);
+        System.out.println("bytes " + Arrays.toString(bytes));
         return Base64.getEncoder().encodeToString(bytes).replace("=", "").replace('+', '-').replace('/', '_');
     }
 
@@ -172,11 +261,27 @@ class Payload {
         this.serial = (int) Packet.fromULEB(data, counter);
         this.devType = data[counter.value++];
         this.cmd = data[counter.value++];
-        if (this.cmd == 6) {
-            this.cmdBody = new CmdBody(Packet.fromULEB(data, counter));
-        } else {
-            String deviceName = decodeString(data, counter);
-            this.cmdBody = new CmdBody(deviceName);
+        this.cmdBody = new CmdBody();
+        switch (this.cmd) {
+            case 2 -> {
+                this.cmdBody.devName = decodeString(data, counter);
+                switch (this.devType) {
+                    case 3 -> {
+                        this.cmdBody.connectedSwitch = new String[data[counter.value++]];
+                        for (int i = 0; i < this.cmdBody.connectedSwitch.length; i++) {
+                            this.cmdBody.connectedSwitch[i] = decodeString(data, counter);
+                        }
+                    }
+                }
+            }
+            case 4 -> {
+                switch (this.devType) {
+                    case 3 -> {
+                        this.cmdBody.status = data[counter.value++];
+                    }
+                }
+            }
+            case 6 -> this.cmdBody.timestamp = Packet.fromULEB(data, counter);
         }
     }
 
@@ -196,38 +301,47 @@ class Payload {
 }
 
 class CmdBody {
-    public String dev_name;
-    public byte[] dev_props;
+    public String devName;
+    public byte[] devProps;
     public long timestamp;
+    public byte status;
+    public String[] connectedSwitch;
+
+    public CmdBody() {
+    }
 
     public CmdBody(long timestamp) {
         this.timestamp = timestamp;
     }
 
-    public CmdBody(String dev_name, byte[] dev_props) {
-        this.dev_name = dev_name;
-        this.dev_props = dev_props;
+    public CmdBody(String devName, byte[] devProps) {
+        this.devName = devName;
+        this.devProps = devProps;
     }
 
-    public CmdBody(String dev_name) {
-        this.dev_name = dev_name;
+    public CmdBody(String devName) {
+        this.devName = devName;
     }
 
     @Override
     public String toString() {
         return "CmdBody{" +
-                "dev_name='" + dev_name + '\'' +
-                ", dev_props=" + Arrays.toString(dev_props) +
+                "devName='" + devName + '\'' +
+                ", devProps=" + Arrays.toString(devProps) +
                 ", timestamp=" + timestamp +
+                ", connectedSwitch=" + Arrays.toString(connectedSwitch) +
+                ", status=" + status +
                 '}';
     }
 }
 
 class Device {
     public int address;
+    public String name;
     public int type;
     public long lastTimeUpdate;
-    public long active = true;
+    public boolean active = true;
+    public String[] connectedSwitch;
 
     public Device() {
     }
@@ -235,6 +349,18 @@ class Device {
     public Device(int address, int type) {
         this.address = address;
         this.type = type;
+    }
+
+    @Override
+    public String toString() {
+        return "Device{" +
+                "address=" + address +
+                ", name='" + name + '\'' +
+                ", type=" + type +
+                ", lastTimeUpdate=" + lastTimeUpdate +
+                ", active=" + active +
+                ", connectedSwitch=" + Arrays.toString(connectedSwitch) +
+                '}';
     }
 }
 
