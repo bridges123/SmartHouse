@@ -21,29 +21,30 @@ public class SmartHouse {
 
         processReturnData(sendDataRequest(whoIsHereData()));
 
-        raw = "OAL_fwQCAghTRU5TT1IwMQ8EDGQGT1RIRVIxD7AJBk9USEVSMgCsjQYGT1RIRVIzCAAGT1RIRVI09w";
-        if (raw.length() % 4 == 2) raw += "==";
-        else if (raw.length() % 4 == 3) raw += "=";
-        raw = raw.replace('-', '+').replace('_', '/');
-        processReturnData(raw);
+//        raw = "OAL_fwQCAghTRU5TT1IwMQ8EDGQGT1RIRVIxD7AJBk9USEVSMgCsjQYGT1RIRVIzCAAGT1RIRVI09w";
+//        if (raw.length() % 4 == 2) raw += "==";
+//        else if (raw.length() % 4 == 3) raw += "=";
+//        raw = raw.replace('-', '+').replace('_', '/');
+//        processReturnData(raw);
+//
+//        raw = "EQIBBgIEBKUB4AfUjgaMjfILrw";
+//        if (raw.length() % 4 == 2) raw += "==";
+//        else if (raw.length() % 4 == 3) raw += "=";
+//        raw = raw.replace('-', '+').replace('_', '/');
+//        processReturnData(raw);
+
 //        boolean go = true;
-//        for (int i = 0; i < devices.size(); i++) {
-//            Device device = devices.get(0);
-//            raw = sendDataRequest(getStatusData(device));
-//            System.out.println(raw);
-//            processReturnData(raw);
-//        }
-//        while (go) {
-//            for (int i = 0; i < devices.size() && go; i++) {
-//                Device device = devices.get(i);
-//                if (device.type != 2) {
-//                    raw = sendDataRequest(getStatusData(device));
+        while (true) {
+            for (int i = 0; i < devices.size(); i++) {
+                Device device = devices.get(i);
+                if (device.type != 2) {
+                    raw = sendDataRequest(getStatusData(device));
 //                    System.out.println(raw);
-//                    processReturnData(raw);
+                    processReturnData(raw);
 //                    go = devices.stream().noneMatch(d -> (d.type == 3 && d.status == 1));
-//                }
-//            }
-//        }
+                }
+            }
+        }
     }
 
     public static String sendDataRequest(String data) {
@@ -55,7 +56,7 @@ public class SmartHouse {
 
     // обработка ответа
     public static void processReturnData(String raw) {
-        System.out.println(Arrays.toString(Base64.getDecoder().decode(raw)));
+//        System.out.println(Arrays.toString(Base64.getDecoder().decode(raw)));
         byte[] bytes = Base64.getDecoder().decode(raw);
         for (int i = 0; i < bytes.length; ) {
             // заполняем пакет данными
@@ -88,25 +89,54 @@ public class SmartHouse {
 
                 // обрабатываем кейсы комбинаций (устройство, команда)
                 if (packet.payload.cmd == 1 || packet.payload.cmd == 2) {
+                    device.active = true;
                     if (packet.payload.devType == 3) {
                         if (packet.payload.cmdBody.connectedSwitch != null)
                             device.connectedSwitch = packet.payload.cmdBody.connectedSwitch;
                     }
                     if (packet.payload.devType == 2) {
-
+                        device.sensorProps = packet.payload.cmdBody.sensorProps;
                     }
                     if (packet.payload.cmd == 1) {
-                        device.active = true;
                         processReturnData(sendDataRequest(IAmHereData()));
                     }
-                    // getStatusData()
+                    processReturnData(sendDataRequest(getStatusData(device)));
                 }
+
                 if (device.active) {
                     if (packet.payload.cmd == 4) {
+                        if (packet.payload.devType == 2) {
+                            EnvSensorStatus sensorStatus = packet.payload.cmdBody.sensorStatus;
+                            EnvSensorProps sensorProps = packet.payload.cmdBody.sensorProps;
+                            if (sensorStatus != null && sensorProps != null) {
+                                for (int k = 0, sid = 0; k < sensorProps.sensors.length; k++) {
+                                    if (sensorProps.sensors[k]) {
+                                        int sensorIndex = k;
+                                        List<Trigger> triggers = Arrays.stream(sensorProps.triggers)
+                                                .filter(trigger -> trigger.sensorTypes == sensorIndex).toList();
+                                        for (Trigger trigger : triggers) {
+                                            boolean triggerResult;
+                                            if (trigger.greater)
+                                                triggerResult = sensorStatus.values[sid] > trigger.value;
+                                            else
+                                                triggerResult = sensorStatus.values[sid] < trigger.value;
+                                            if (triggerResult) {
+                                                Optional<Device> optDeviceToTurn = devices.stream()
+                                                        .filter(d -> d.name.equals(trigger.name))
+                                                        .findFirst();
+                                                optDeviceToTurn.ifPresent(value -> processReturnData(
+                                                        sendDataRequest(setStatusData(value, trigger.on))
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if (packet.payload.devType == 3 || packet.payload.devType == 4 || packet.payload.devType == 5) {
                             device.status = packet.payload.cmdBody.status;
                             if (packet.payload.devType == 3) {
-                                System.out.println("switch " + device.name + " status cmd " + device.status);
+//                                System.out.println("switch " + device.name + " status cmd " + device.status);
                                 if (device.active && device.connectedSwitch != null)
                                     switchTurnConnectedDevices(device);
                             }
@@ -115,25 +145,25 @@ public class SmartHouse {
                     device.lastTimeUpdate = time;
                 }
             }
-            System.out.println(packet);
+//            System.out.println(packet);
         }
-//            for (Device device : devices) {
-//                if (time - device.lastTimeUpdate > 300)
-//                    device.active = false;
-//                else
-//                    System.out.println("device: " + device);
-//            }
-//            System.out.println("end devices");
+//        for (Device device : devices) {
+//            if (time - device.lastTimeUpdate > 300)
+//                device.active = false;
+//            else
+//                System.out.println("device: " + device);
+//        }
+//        System.out.println("end devices");
     }
 
     // вкл/выкл подключенных к switch девайсов
     public static void switchTurnConnectedDevices(Device switchDev) {
         for (String deviceName : switchDev.connectedSwitch) {
-            System.out.println("switch devices " + devices);
+//            System.out.println("switch devices " + devices);
             Optional<Device> optDevice = devices.stream().filter(d -> d.name.equals(deviceName)).findFirst();
             if (optDevice.isPresent()) {
                 Device connDev = optDevice.get();
-                System.out.println("switched on " + connDev.name);
+//                System.out.println("switched on " + connDev.name);
                 connDev.status = 1;
 
                 String raw = sendDataRequest(setStatusData(connDev, switchDev.status));
@@ -154,7 +184,7 @@ public class SmartHouse {
                 dos.writeBytes(data);
             }
             if (connection.getResponseCode() == 204) {
-                System.out.println("devices after " + devices);
+//                System.out.println("devices after " + devices);
                 System.exit(0);
             } else if (connection.getResponseCode() != 200) {
                 System.exit(99);
@@ -165,7 +195,7 @@ public class SmartHouse {
             else if (raw.length() % 4 == 3) raw += "=";
             raw = raw.replace('-', '+').replace('_', '/');
         } catch (Exception ex) {
-            ex.printStackTrace();
+//            ex.printStackTrace();
             System.exit(99);
         }
         return raw;
@@ -233,7 +263,7 @@ public class SmartHouse {
     public static String generateRequestRaw(ArrayList<Byte> payload) {
         byte[] bytes = listToBytes(payload);
         bytes[bytes.length - 1] = computeSRC8(payload);
-//        System.out.println("bytes " + Arrays.toString(bytes));
+//        System.out.§ln("bytes " + Arrays.toString(bytes));
 
         return Base64.getEncoder().encodeToString(bytes).replace("=", "").replace('+', '-').replace('/', '_');
     }
@@ -324,6 +354,7 @@ class Payload {
             }
             case 4 -> {
                 switch (this.devType) {
+                    case 2 -> cmdBody.sensorStatus = new EnvSensorStatus(data, counter);
                     case 3, 5 -> cmdBody.status = data[counter.value++];
                 }
             }
@@ -360,6 +391,7 @@ class CmdBody {
     public byte status;
     public String[] connectedSwitch;
     public EnvSensorProps sensorProps;
+    public EnvSensorStatus sensorStatus;
 
     public CmdBody() {
     }
@@ -372,6 +404,7 @@ class CmdBody {
                 ", status=" + status +
                 ", connectedSwitch=" + Arrays.toString(connectedSwitch) +
                 ", sensorProps=" + sensorProps +
+                ", sensorStatus=" + sensorStatus +
                 '}';
     }
 }
@@ -413,22 +446,6 @@ class EnvSensorProps {
     public boolean[] sensors;
     public Trigger[] triggers;
 
-    public boolean hasTempSensor() {
-        return sensors[0];
-    }
-
-    public boolean hasHumidSensor() {
-        return sensors[1];
-    }
-
-    public boolean hasIllumSensor() {
-        return sensors[2];
-    }
-
-    public boolean hasPollutionSensor() {
-        return sensors[3];
-    }
-
     public EnvSensorProps(byte[] data, Counter counter) {
         int sensors = data[counter.value++];
         this.sensors = new boolean[]{(sensors & 1) == 1, (sensors & 2) == 2, (sensors & 4) == 4, (sensors & 8) == 8};
@@ -436,9 +453,9 @@ class EnvSensorProps {
         for (int i = 0; i < triggers.length; i++) {
             Trigger trigger = new Trigger();
             int op = data[counter.value++];
-            trigger.on = (op & 1) == 1;
+            trigger.on = (byte) (op & 1);
             trigger.greater = (op & 2) == 2;
-            trigger.sensorTypes = (op & 12);
+            trigger.sensorTypes = (op & 12) >> 2;
             trigger.value = (int) Packet.fromULEB(data, counter);
             trigger.name = Payload.decodeString(data, counter);
             triggers[i] = trigger;
@@ -455,7 +472,7 @@ class EnvSensorProps {
 }
 
 class Trigger {
-    public boolean on;
+    public byte on;
     public boolean greater;
     public int sensorTypes;
     public int value;
@@ -475,6 +492,21 @@ class Trigger {
 
 class EnvSensorStatus {
     public int[] values;
+
+    public EnvSensorStatus(byte[] data, Counter counter) {
+        int len = data[counter.value++];
+        values = new int[len];
+        for (int i = 0; i < len; i++) {
+            values[i] = (int) Packet.fromULEB(data, counter);
+        }
+    }
+
+    @Override
+    public String toString() {
+        return "EnvSensorStatus{" +
+                "values=" + Arrays.toString(values) +
+                '}';
+    }
 }
 
 class Counter {
